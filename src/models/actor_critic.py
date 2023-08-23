@@ -14,7 +14,7 @@ from dataset import Batch
 from envs.world_model_env import WorldModelEnv
 from models.tokenizer import Tokenizer
 from models.world_model import WorldModel
-from utils import compute_lambda_returns, LossWithIntermediateLosses
+from iris.src.models.tokenizer.utils import compute_lambda_returns, LossWithIntermediateLosses
 
 
 @dataclass
