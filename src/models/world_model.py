@@ -19,65 +19,65 @@ from utils import init_weights, LossWithIntermediateLosses
 class WorldModelOutput:
     output_sequence: torch.FloatTensor
     logits_observations: torch.FloatTensor
-    
 class WorldModel(nn.Module):
     def __init__(self, obs_vocab_size: int, config: TransformerConfig) -> None:
         super().__init__()
+        self.max_blocks = 9
         self.obs_vocab_size = obs_vocab_size
-        config = TransformerConfig(tokens_per_block=768, max_blocks=3, attention="causal", num_layers=6, num_heads=8, embed_dim=256, embed_pdrop=0.1, resid_pdrop=0.1, attn_pdrop=0.1)
+        self.sequence_length = 9 
+        self.num_steps =  6 
+        self.prev_steps = 3 
+        self.embed_dim = 256
+        self.config = config
         self.transformer = Transformer(config)
-        batch_size= 1
-        sequence_length = 1536
-
-# Create a tensor with ones for the known tokens and zeros for the unknown tokens
-        known_steps = 768 
-        block_mask = torch.cat([torch.ones(known_steps), torch.zeros(sequence_length)]).to(device='cuda:1')
-        #print(block_mask.size())
-        self.block_mask_tensor = block_mask.unsqueeze(0).expand(batch_size, -1).to(device='cuda:1')
-
-        posit_emb_in=nn.Embedding(768, 256)
-        posit_emb_out=nn.Embedding(1536, 256)
-        self.image_embed=nn.Embedding(1024,256)
-
-        self.Positional = posit_emb_in(torch.arange(768)).to(device='cuda:1')
-        self.Predicted = posit_emb_out (torch.arange(1536)).to(device='cuda:1')
-        #print("positional", self.Positional.size())
-        self.pos_emb_in = self.Positional.unsqueeze(0).expand(batch_size, -1, -1).to(device='cuda:1')
-        #print(self.pos_emb_in.size())
-        self.pos_emb_out = self.Predicted.unsqueeze(0).expand(batch_size, -1, -1).to(device='cuda:1')
-        #print("positional", self.pos_emb_out.size())
 
 
-        self.head_observations = nn.Linear(256, 256)
+        input_block_mask = torch.cat([torch.ones(self.prev_steps), torch.zeros(self.num_steps - self.prev_steps)])
+
+        block_masks = [input_block_mask]
+        embedding_table = [nn.Embedding(self.obs_vocab_size, self.embed_dim).to('cuda:1')]
+        self.image_embedder = Embedder(self.max_blocks, block_masks, embedding_table)
+        self.pos_emb =  nn.Embedding(self.sequence_length, self.embed_dim)
+        # Generate dummy values for num_steps and prev_steps
+
+        self.head_observations = Head(
+            max_blocks=config.max_blocks,
+            block_mask=input_block_mask,
+            head_module=nn.Sequential(
+                nn.Linear(config.embed_dim, config.embed_dim),
+                nn.ReLU(),
+                nn.Linear(config.embed_dim, obs_vocab_size)
+            )
+        )
+
+
+
+        self.apply(init_weights)
            
 
+    def __repr__(self) -> str:
+        return "world_model"
             
+   
 
-            
-        self.apply(init_weights)
+    def forward(self, obs_tokens: torch.LongTensor, past_keys_values: Optional[KeysValues] = None) -> torch.FloatTensor:
+
+        obs_tokens = obs_tokens.to('cuda:1')
+        num_steps = obs_tokens.size(1)  # (B, T)
+        prev_steps = 0 if past_keys_values is None else past_keys_values.size
+       
+
+        embedded_output = self.image_embedder(obs_tokens, num_steps, prev_steps).to('cuda:1')
+        self.embed = embedded_output
 
         
-
-    def forward(self, obs_tokens: torch.LongTensor) -> torch.FloatTensor:
-        
-        #assert num_steps <= self.config.max_tokens
-        context_image = self.image_embed(self.obs_tokens[:, :768]).to(device='cuda:1')
-        predicted_image= self.image_embed(self.obs_tokens[:, 768:]).to(device='cuda:1')
-        combined_context_image = context_image + self.Positional
-        combined_context_image.to(device='cuda:1')
-        self.combined_predicted_image = predicted_image + self.Predicted
-        self.combined_predicted_image.to(device='cuda:1')
-
-        self.combined_image=torch.cat([combined_context_image, self.combined_predicted_image], dim=1)
-        print("Combined Image", self.combined_image.size())
-         # Apply block mask multiplication
-        combining_image = self.combined_image * self.block_mask_tensor.unsqueeze(2)
-        #print("COMBINED",combining_image.size())
-        
+        position= self.pos_emb(prev_steps +  torch.arange(num_steps).to('cuda:1'))
+        self.context_image = embedded_output + position.unsqueeze(0)
+        #print("Context Image", self.context_image.size())
         
 
-        x = self.transformer(combining_image)
-        logits_observations = self.head_observations(x)
+        x = self.transformer(self.context_image)
+        logits_observations = self.head_observations(x, num_steps=num_steps, prev_steps=prev_steps)
         #print("x world", x.size())
         #print("logit", logits_observations.size())
 
@@ -85,25 +85,28 @@ class WorldModel(nn.Module):
     
 
 
-    def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs: Any) -> LossWithIntermediateLosses:
-        with torch.no_grad():
-            batch_obs = batch.unsqueeze(2)
+    def compute_loss(self, batch: Batch,**kwargs: Any) -> LossWithIntermediateLosses:
+        
 
-            shape = batch_obs.shape
-            # print(shape)
-            self.obs_tokens= tokenizer.encode(batch_obs[:,:,:,:,:], should_preprocess=True).tokens 
-            self.obs_tokens=self.obs_tokens.view(4, -1)
-            # print(self.obs_tokens)
+        obs_tokens=batch
+        obs_tokens=obs_tokens
+        shape=obs_tokens.shape
+        #print("Observation token", shape[1])
+       
+        x, logits_observations = self.forward(obs_tokens)
+       # print("logit output", (logits_observations.view(-1,self.obs_vocab_size)).size())
+        #logits_observations=x
+        #print(logits_observations)
 
-            x, logits_observations = self.forward(self.obs_tokens)
-
-            target_obs = self.combined_predicted_image
-            #print("Target observation", target_obs.size())
+        target_obs = obs_tokens[:, self.prev_steps:shape[1]]
+        
+        #print("Target observation", target_obs.size())
         
         # Compute the loss between the predicted observations and the real target observations
-            predicted_obs = x
-            # print("Predicted Obs", predicted_obs.size())
-            loss_obs = F.cross_entropy((logits_observations.view(-1, logits_observations.size(-1))), (self.combined_image.view(-1,self.combined_image.size(-1))))
-            print("Losses", loss_obs)
+        #predicted_obs = torch.cat([target_obs[:,:self.prev_steps, :],logits_observations], dim=1)
+        predicted_obs=logits_observations.view(-1,self.obs_vocab_size)
+        #print("Predicted Obs", predicted_obs.size())
+        loss_obs = F.cross_entropy(predicted_obs, (target_obs.view(-1)))
+        #print("Cross entropy Losses", loss_obs)
 
         return LossWithIntermediateLosses(loss_obs=loss_obs)

@@ -94,6 +94,7 @@ class vgg16(torch.nn.Module):
                 param.requires_grad = False
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
+        
         h = self.slice1(X)
         h_relu1_2 = h
         h = self.slice2(h)
